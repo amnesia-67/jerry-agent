@@ -71,6 +71,30 @@ def _env_names(name: str) -> set[str]:
     return out
 
 
+def _env_subs(name: str) -> dict[str, int]:
+    """Parse ``handle:sub_bot_user_id`` pairs.
+
+    Whose jobs run on whose machine. A person with a sub-Jerry here has their
+    work routed to it; anybody else is run by master locally.
+
+        JERRY_SUBS=a.o.luzhnov:1570000000000000001, papai0.3:1570000000000000002
+    """
+    out: dict[str, int] = {}
+    for entry in os.environ.get(name, "").split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        handle_part, id_part = entry.rsplit(":", 1)
+        handle = normalize_username(handle_part)
+        try:
+            sub_id = int(id_part.strip())
+        except ValueError:
+            continue
+        if handle and sub_id:
+            out[handle] = sub_id
+    return out
+
+
 ALL_AGENTS = "*"
 
 
@@ -127,6 +151,8 @@ class Settings:
     user_agents: dict[str, set[str]]
     access_locked: bool
     use_threads: bool
+    dispatch_channel_id: int
+    subs: dict[str, int]
 
     # ------------------------------------------------------------ access ---
     def permitted_agents(self, handle: str) -> set[str] | None:
@@ -197,6 +223,8 @@ class Settings:
                 "JERRY_USER_AGENTS",
             ),
             use_threads=_env_bool("JERRY_USE_THREADS", True),
+            dispatch_channel_id=_env_int("JERRY_DISPATCH_CHANNEL_ID", 0),
+            subs=_env_subs("JERRY_SUBS"),
         )
 
 

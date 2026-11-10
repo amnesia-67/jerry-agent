@@ -22,7 +22,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
-from jerry import agents, formatting as fmt, quips
+from jerry import agents, bus, dispatch, formatting as fmt, quips
 from jerry.config import OVERRIDES_PATH, Settings, State, normalize_username
 from jerry.jobs import Job, JobManager
 
@@ -102,6 +102,14 @@ class Jerry(discord.Client):
 
 client = Jerry()
 tree = client.tree
+
+# Routes a person's jobs to the sub-Jerry on their own machine, when they have
+# one. Without JERRY_SUBS this stays dormant and everything runs locally.
+ROUTER = dispatch.Router(
+    client,
+    dispatch_channel_id=SETTINGS.dispatch_channel_id,
+    subs=SETTINGS.subs,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -250,13 +258,15 @@ def status_text(job: Job, blurb: str, queue_note: str = "") -> str:
     head = (
         f"{spec.emoji} **{spec.label}** is on it — *{blurb}*\n"
         f"`{fmt.human_duration(job.elapsed)}` · "
-        f"workspace `{job.workspace.name}`"
     )
+    # Say whose computer this is actually happening on; "it worked for me"
+    # gets confusing fast once jobs run in three places.
+    head += f"on {job.location}" if job.location else f"workspace `{job.workspace.name}`"
     if job.model:
         head += f" · model `{job.model}`"
     if queue_note:
         head += f"\n{queue_note}"
-    tail = job.handle.tail(1) if job.handle else ""
+    tail = job.latest()
     if tail:
         head += f"\n> {fmt.tidy_tail(tail)}"
     return head[: fmt.SAFE_LIMIT]
@@ -343,14 +353,20 @@ async def dispatch(
     channel_id = int(getattr(target, "id", 0))
     convo = convo_id_for(target)
 
+    handle = normalize_username(requester.name)
+    sub_id = ROUTER.sub_for(handle)
+
     job = Job(
         channel_id=channel_id,
         requester=requester.display_name,
         requester_id=requester.id,
+        requester_handle=handle,
         task=task,
         spec=spec,
         workspace=workspace,
         model=model,
+        sub_id=sub_id,
+        location=f"@{handle}'s machine" if sub_id else "",
     )
 
     ahead = JOBS.submit(job, lambda j: _run(j, target, status_msg, convo, source))
@@ -403,15 +419,18 @@ async def _run(
     )
 
     try:
-        result = await agents.run_agent(
-            job.spec,
-            prompt,
-            workspace=job.workspace,
-            model=job.model,
-            full_auto=SETTINGS.full_auto,
-            timeout=SETTINGS.timeout,
-            handle=handle,
-        )
+        if job.sub_id:
+            result = await _run_on_sub(job, prompt)
+        else:
+            result = await agents.run_agent(
+                job.spec,
+                prompt,
+                workspace=job.workspace,
+                model=job.model,
+                full_auto=SETTINGS.full_auto,
+                timeout=SETTINGS.timeout,
+                handle=handle,
+            )
     except asyncio.CancelledError:
         tick.cancel()
         job.status = "cancelled"
@@ -439,6 +458,57 @@ async def _run(
     await react(source, "✅" if result.ok else "\U0001f4a5")
 
 
+async def _run_on_sub(job: Job, prompt: str) -> agents.AgentResult:
+    """Hand the job to the requester's own machine and wait for the answer."""
+    assert job.sub_id is not None
+    def note(line: str) -> None:
+        job.progress = line
+
+    try:
+        env, entry = await ROUTER.run(
+            sub_id=job.sub_id,
+            requester=job.requester_handle,
+            agent=job.spec.key,
+            model=job.model,
+            timeout=SETTINGS.timeout,
+            task=job.task,
+            prompt=prompt,
+            full_auto=SETTINGS.full_auto,
+            progress_sink=note,
+        )
+    finally:
+        job.progress = ""
+
+    if env is None:
+        waited = fmt.human_duration(entry.elapsed)
+        hint = (
+            "it never even picked the job up — is the sub-Jerry running?"
+            if not entry.claimed
+            else "it started and then went quiet; check that machine."
+        )
+        return agents.AgentResult(
+            ok=False,
+            output="",
+            exit_code=None,
+            duration=entry.elapsed,
+            argv=[],
+            error=(
+                f"**@{entry.owner}**'s sub-Jerry didn't answer after {waited}: {hint}"
+            ),
+        )
+
+    return agents.AgentResult(
+        ok=bool(env.ok),
+        output=env.output or "",
+        exit_code=env.exit_code,
+        duration=float(env.duration or entry.elapsed),
+        argv=[],
+        timed_out=env.timed_out,
+        cancelled=env.cancelled,
+        error=env.error,
+    )
+
+
 async def begin(
     *,
     channel: discord.abc.Messageable,
@@ -457,16 +527,20 @@ async def begin(
     denied = permission_error(requester, spec.key)
     if denied:
         return denied
-    if not spec.available:
-        return (
-            f"{quips.no_binary()}\n`{spec.binary}` is not on this machine's PATH.\n"
-            f"• install: `{spec.install}`\n• sign in: {spec.login}"
-        )
-    if not workspace.exists() or not workspace.is_dir():
-        return (
-            f"My workspace `{workspace}` does not exist, which makes coding hard.\n"
-            "Point me somewhere real with `/workspace path:<folder>`."
-        )
+    # Only vet the local machine when the work will actually happen here. For
+    # a routed job the agent and the workspace belong to the sub, which knows
+    # its own state far better than we do -- it reports back if it can't run.
+    if ROUTER.sub_for(normalize_username(requester.name)) is None:
+        if not spec.available:
+            return (
+                f"{quips.no_binary()}\n`{spec.binary}` is not on this machine's PATH.\n"
+                f"• install: `{spec.install}`\n• sign in: {spec.login}"
+            )
+        if not workspace.exists() or not workspace.is_dir():
+            return (
+                f"My workspace `{workspace}` does not exist, which makes coding hard.\n"
+                "Point me somewhere real with `/workspace path:<folder>`."
+            )
 
     target = channel
     if new_thread:
@@ -507,6 +581,17 @@ async def on_ready() -> None:
         SETTINGS.max_parallel,
         SETTINGS.full_auto,
     )
+    if ROUTER.enabled:
+        log.info(
+            "routing to sub-Jerries in channel %s: %s",
+            ROUTER.dispatch_channel_id,
+            ", ".join(f"@{h}->{i}" for h, i in sorted(ROUTER.subs.items())),
+        )
+        if ROUTER.channel() is None:
+            log.warning(
+                "dispatch channel %s is not visible to me; routed jobs will fail",
+                ROUTER.dispatch_channel_id,
+            )
     found = [s.key for s in agents.available_specs()]
     # "On PATH" is not "works": a wrapper can resolve and still be a dead end.
     # /doctor actually runs each one; this is only a first look.
@@ -540,8 +625,21 @@ async def on_ready() -> None:
 
 
 @client.event
+async def on_message_edit(_before: discord.Message, after: discord.Message) -> None:
+    # Subs report progress by editing their own ack message.
+    if ROUTER.dispatch_channel_id:
+        await ROUTER.handle_edit(after)
+
+
+@client.event
 async def on_message(message: discord.Message) -> None:
-    if message.author.bot or client.user is None:
+    if client.user is None:
+        return
+    # Sub-Jerry traffic first: these come from bots, so they have to be handled
+    # before the bot-author check below throws them away.
+    if ROUTER.dispatch_channel_id and await ROUTER.handle_message(message):
+        return
+    if message.author.bot:
         return
     # Mention-only, by design. Discord puts the bot in `mentions` for an
     # explicit @ and for a reply-ping, which is exactly the set we want.
@@ -630,7 +728,8 @@ async def ask(
         if denied:
             await interaction.followup.send(denied, ephemeral=True)
             return
-    if spec is None or not spec.available or not workspace.is_dir():
+    local = ROUTER.sub_for(normalize_username(interaction.user.name)) is None
+    if spec is None or (local and (not spec.available or not workspace.is_dir())):
         error = await _preflight_error(spec, key, workspace)
         await interaction.followup.send(error, ephemeral=True)
         return
@@ -880,10 +979,11 @@ async def status_cmd(interaction: discord.Interaction) -> None:
         return
     lines = []
     for job in active:
-        tail = job.handle.tail(1) if job.handle else ""
+        tail = job.latest()
+        where = f" · on {job.location}" if job.location else ""
         lines.append(
             f"▶ `#{job.job_id}` {job.spec.emoji} {job.spec.label} · "
-            f"{fmt.human_duration(job.elapsed)} · for **{job.requester}**\n"
+            f"{fmt.human_duration(job.elapsed)} · for **{job.requester}**{where}\n"
             f" {fmt.tidy_tail(job.task, 90)}"
             + (f"\n > {fmt.tidy_tail(tail, 90)}" if tail else "")
         )
@@ -898,6 +998,48 @@ async def status_cmd(interaction: discord.Interaction) -> None:
         colour=0xFEE75C,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@tree.command(name="subs", description="Which sub-Jerries are alive, and what they have.")
+async def subs_cmd(interaction: discord.Interaction) -> None:
+    if not ROUTER.dispatch_channel_id or not ROUTER.subs:
+        await interaction.response.send_message(
+            "No sub-Jerries configured — everything runs on my machine.\n"
+            "Set `JERRY_DISPATCH_CHANNEL_ID` and `JERRY_SUBS` to route jobs to "
+            "other people's computers.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    pongs = await ROUTER.ping()
+    answered = {p.owner or "?": p for p in pongs}
+
+    rows: list[str] = []
+    for handle, sub_id in sorted(ROUTER.subs.items()):
+        pong = answered.get(handle)
+        if pong is None:
+            rows.append(
+                f"✖ **@{handle}** — no answer. Their sub-Jerry isn't "
+                "running, or can't see the dispatch channel."
+            )
+            continue
+        have = ", ".join(f"`{a}`" for a in pong.agents) or "_nothing installed_"
+        auto = "full auto" if pong.full_auto else "edits only"
+        rows.append(
+            f"✔ **@{handle}** — {have}\n"
+            f" {pong.host or 'unknown host'} · `{pong.workspace or '?'}` "
+            f"· {auto}"
+        )
+
+    unrouted = "everyone else runs on my machine"
+    embed = discord.Embed(
+        title="Sub-Jerries",
+        description="\n".join(rows)[: fmt.EMBED_DESC_LIMIT],
+        colour=0x5865F2,
+    )
+    embed.set_footer(text=f"Asked and waited 6s · {unrouted}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @tree.command(name="cancel", description="Stop whatever is running in this channel.")
@@ -1025,6 +1167,15 @@ async def doctor_cmd(interaction: discord.Interaction) -> None:
         + ("✔" if workspace.is_dir() else "✖ missing")
         + git_line
         + f"\n**Timeout:** {SETTINGS.timeout}s · **Parallel:** {SETTINGS.max_parallel}"
+        + (
+            "\n**Routing:** "
+            + (
+                ", ".join(f"@{h}→sub" for h in sorted(ROUTER.subs))
+                + " · everyone else local (`/subs` for liveness)"
+                if ROUTER.enabled
+                else "everything runs here"
+            )
+        )
         + f"\n**Approvals:** {auto}\n**Access:** {gate}"
     )
     embed = discord.Embed(

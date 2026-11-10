@@ -127,6 +127,78 @@ Reactions, Read Message History. No privileged intents required.
 Set `JERRY_GUILD_IDS` to your server id so slash commands register instantly
 instead of waiting on Discord's global sync.
 
+## Running agents on other people's machines
+
+By default every agent runs wherever the bot runs — one machine, one working
+tree, one person's subscriptions. That stops scaling the moment a second person
+uses it.
+
+So Jerry can split in two. **Master Jerry** is the bot everyone talks to.
+**Sub-Jerries** run on their owners' machines, each signed into that person's
+own CLI, each with its own checkout. Master routes a request to the right
+sub, the agent runs there, and the answer comes back to the thread. One
+`@Jerry` for the team, work spread across everyone's hardware and quota.
+
+Discord itself is the transport, which is the point: master usually lives on a
+laptop behind NAT, so nothing can connect *to* it. But every machine involved
+is already connected to Discord, so there's no tunnel, no database and no
+public address anywhere.
+
+```
+you ──@Jerry──> master ──dispatch channel──> sub on Luzhnov's laptop
+                      <──result envelope────      (runs grok there)
+```
+
+### Setting it up
+
+Make a **private** channel for dispatch — say `#jerry-dispatch` — that only
+master and the sub-bots can post in. Then on master:
+
+```
+JERRY_DISPATCH_CHANNEL_ID=1570000000000000000
+JERRY_SUBS=a.o.luzhnov:1570000000000000001, papai0.3:1570000000000000002
+```
+
+Anyone not listed in `JERRY_SUBS` still runs on master's machine, so you can
+move people over one at a time.
+
+Each teammate clones this repo and runs one command:
+
+```bash
+python setup_sub.py
+```
+
+It builds the venv, asks for their handle, their own bot token, master's id and
+the channel id, picks an agent, sets up the workspace (cloning it if needed),
+writes their `.env`, prints their bot's invite URL, and prints the exact
+`JERRY_SUBS` line to send you. Then:
+
+```bash
+.venv\Scripts\python subjerry.py
+```
+
+`/subs` asks every configured sub to identify itself and reports who answered,
+what they have installed, which machine, and whether they're on full auto.
+
+### What keeps this safe
+
+A sub-Jerry runs whatever an agent decides to do, on someone's real computer.
+It accepts a job only when **all three** of these hold: the message is from the
+configured `JERRY_MASTER_ID`, it is in the configured dispatch channel, and it
+mentions that sub. Anything else — a teammate posting a perfect-looking
+envelope, master talking in another channel, a different bot — is ignored, and
+a missing setting fails closed rather than open.
+
+That is why the dispatch channel must be private. Anyone who can post there as
+master could run commands on your teammates' machines.
+
+Two further things worth knowing. A sub never grants more than its own owner
+configured: master can ask for full auto, but if that machine has
+`JERRY_FULL_AUTO=0` it stays off there. And the whole job travels as a JSON
+attachment rather than in message text, because a bot only receives message
+content when mentioned — attachments are always readable, so neither side needs
+the privileged message-content intent.
+
 ## Slash commands
 
 | command | what it does |
@@ -138,7 +210,8 @@ instead of waiting on Discord's global sync.
 | `/agent reset` | drop the channel override |
 | `/model <id\|clear>` | pin a model for this channel |
 | `/workspace [path] [server_wide]` | show, or move, the folder agents work in (Manage Server to change) |
-| `/status` | what's running and what's queued |
+| `/status` | what's running, where, and what's queued |
+| `/subs` | which sub-Jerries are alive and what they have |
 | `/cancel` | kill this channel's run, children included |
 | `/reset` | forget this thread's conversation history |
 | `/doctor` | installed CLIs, versions, workspace, git status, access rules |
@@ -237,7 +310,11 @@ should narrow someone's access, never widen it.
 ## Layout
 
 ```
-bot.py                Discord layer: mention handling, slash commands
+bot.py                master Jerry: mentions, slash commands, routing
+subjerry.py           sub-Jerry: runs agents on a teammate's own machine
+setup_sub.py          one-shot setup a teammate runs to become a sub
+jerry/bus.py          the dispatch protocol, and the trust gate
+jerry/dispatch.py     master-side routing and result matching
 jerry/agents.py       backend registry + headless process runner
 jerry/jobs.py         per-channel queue, global parallelism cap, cancellation
 jerry/config.py       env settings, per-channel overrides, thread memory

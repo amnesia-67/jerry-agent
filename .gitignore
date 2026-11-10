@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!.env.sub.example
 .venv/
 jerry.state.json
 agents.local.json

@@ -33,6 +33,11 @@ class Job:
     started_at: float | None = None
     handle: RunHandle | None = None
     status: str = "queued"  # queued | running | done | failed | cancelled
+    # Set when the work is routed to somebody's own machine via a sub-Jerry.
+    sub_id: int | None = None
+    requester_handle: str = ""
+    location: str = ""
+    progress: str = ""
     _task: asyncio.Task | None = field(default=None, repr=False)
 
     @property
@@ -44,6 +49,12 @@ class Job:
         if self.started_at is None:
             return 0.0
         return time.monotonic() - self.started_at
+
+    def latest(self) -> str:
+        """Best progress line available, whether run locally or on a sub."""
+        if self.progress:
+            return self.progress
+        return self.handle.tail(1) if self.handle else ""
 
     def cancel(self) -> None:
         self.status = "cancelled"
