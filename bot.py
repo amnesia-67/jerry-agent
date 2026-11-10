@@ -453,7 +453,12 @@ async def on_ready() -> None:
         SETTINGS.full_auto,
     )
     found = [s.key for s in agents.available_specs()]
-    log.info("agent CLIs on PATH: %s", ", ".join(found) if found else "NONE")
+    # "On PATH" is not "works": a wrapper can resolve and still be a dead end.
+    # /doctor actually runs each one; this is only a first look.
+    log.info(
+        "agent CLIs on PATH (unverified, run /doctor): %s",
+        ", ".join(found) if found else "NONE",
+    )
     if not found:
         log.warning(
             "No agent CLI found. Install at least one and sign it in, e.g. "
@@ -862,11 +867,19 @@ async def doctor_cmd(interaction: discord.Interaction) -> None:
                 env=agents.child_env(),
             )
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
-            version = agents.clean_output(out.decode("utf-8", "replace")).split("\n")
-            version = [v for v in version if v.strip()]
-            tag = version[-1][:48] if version else "responded"
+            lines = [
+                v
+                for v in agents.clean_output(out.decode("utf-8", "replace")).split("\n")
+                if v.strip()
+            ]
+            tag = lines[-1][:48] if lines else "responded"
+            if proc.returncode != 0:
+                # On PATH but not actually usable. A VS Code shim does this:
+                # it resolves, then tells you the real CLI isn't installed.
+                why = (lines[0] if lines else "no output")[:90]
+                return f"✖ `{spec.key}` — on PATH but broken: {why}"
         except asyncio.TimeoutError:
-            return f"⚠ `{spec.key}` — installed but didn't answer in 20s"
+            return f"⚠ `{spec.key}` — on PATH but didn't answer in 20s"
         except Exception as exc:  # noqa: BLE001
             return f"⚠ `{spec.key}` — {type(exc).__name__}"
         return f"✔ `{spec.key}` — `{tag}`"
