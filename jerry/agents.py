@@ -31,6 +31,24 @@ SPINNER_RE = re.compile(r"[⠀-⣿─-╿■-◿]")
 # discover that limit live on stage.
 ARGV_PROMPT_LIMIT = 6000
 
+# Where to look when a CLI is installed but PATH says otherwise. An installer
+# that edits the persisted PATH cannot reach processes that are already
+# running, so a bot started before the install never sees the new binary --
+# and neither does the terminal it was launched from. Searching the usual
+# per-user install directories turns a baffling "not installed" into a
+# working agent.
+FALLBACK_DIRS = (
+    "%LOCALAPPDATA%/agy/bin",  # Antigravity CLI
+    "%APPDATA%/npm",  # npm -g on Windows
+    "%LOCALAPPDATA%/Programs/npm",
+    "~/.local/bin",
+    "~/.npm-global/bin",
+    "/usr/local/bin",
+)
+
+# Windows executables do not have to be named exactly what you typed.
+_WINDOWS_SUFFIXES = (".exe", ".cmd", ".bat", ".ps1", "")
+
 # How a CLI is told to go read its task from a file instead of from argv.
 TASK_FILE_POINTER = (
     "Your full instructions are in the UTF-8 text file at {path}. "
@@ -59,7 +77,13 @@ class AgentSpec:
 
     @property
     def resolved_binary(self) -> str | None:
-        return shutil.which(self.binary)
+        found = shutil.which(self.binary)
+        if found:
+            return found
+        # An absolute path in `binary` that PATH lookup already rejected.
+        if os.path.isabs(self.binary):
+            return None
+        return _search_fallback_dirs(self.binary)
 
     @property
     def available(self) -> bool:
@@ -91,6 +115,20 @@ class AgentSpec:
             else:
                 out.append(token)
         return out
+
+
+def _search_fallback_dirs(binary: str) -> str | None:
+    """Look for `binary` in the usual per-user install dirs, ignoring PATH."""
+    suffixes = _WINDOWS_SUFFIXES if sys.platform == "win32" else ("",)
+    for raw in FALLBACK_DIRS:
+        folder = Path(os.path.expandvars(raw)).expanduser()
+        if "%" in str(folder) or not folder.is_dir():
+            continue  # unexpanded variable, or simply not there
+        for suffix in suffixes:
+            candidate = folder / f"{binary}{suffix}"
+            if candidate.is_file():
+                return str(candidate)
+    return None
 
 
 REGISTRY: dict[str, AgentSpec] = {}
