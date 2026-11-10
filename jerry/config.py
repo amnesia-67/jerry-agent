@@ -71,6 +71,45 @@ def _env_names(name: str) -> set[str]:
     return out
 
 
+ALL_AGENTS = "*"
+
+
+def _env_user_agents(name: str) -> dict[str, set[str]]:
+    """Parse per-person model access.
+
+    ``handle:agent`` entries, comma separated, several agents joined by ``|``
+    or ``/``. ``*`` means every backend. Names are resolved through the agent
+    aliases, so ``papai0.3:chatgpt`` records ``codex``.
+
+        JERRY_USER_AGENTS=a.o.luzhnov:grok, papai0.3:chatgpt, sam:claude|grok
+    """
+    out: dict[str, set[str]] = {}
+    raw = os.environ.get(name, "")
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        handle_part, agent_part = entry.split(":", 1)
+        handle = normalize_username(handle_part)
+        if not handle:
+            continue
+        keys: set[str] = set()
+        for token in agent_part.replace("/", "|").replace(" ", "|").split("|"):
+            token = token.strip().lower()
+            if not token:
+                continue
+            if token == ALL_AGENTS:
+                keys.add(ALL_AGENTS)
+                continue
+            resolved = agents.canonical(token)
+            # Keep an unknown name rather than dropping it: silently widening
+            # someone's access because of a typo would be the wrong failure.
+            keys.add(resolved or token)
+        if keys:
+            out.setdefault(handle, set()).update(keys)
+    return out
+
+
 @dataclass
 class Settings:
     """Boot-time configuration, all from the environment."""
@@ -85,8 +124,39 @@ class Settings:
     allowed_user_ids: set[int]
     allowed_role_ids: set[int]
     allowed_usernames: set[str]
+    user_agents: dict[str, set[str]]
     access_locked: bool
     use_threads: bool
+
+    # ------------------------------------------------------------ access ---
+    def permitted_agents(self, handle: str) -> set[str] | None:
+        """Which backends this person may use. None means no restriction.
+
+        A handle in JERRY_ALLOWED_USERNAMES is unrestricted. A handle in
+        JERRY_USER_AGENTS is limited to the backends listed against it. With
+        no allowlist configured at all, nobody is restricted.
+        """
+        folded = normalize_username(handle)
+        if folded in self.allowed_usernames:
+            return None
+        grant = self.user_agents.get(folded)
+        if grant is not None:
+            if ALL_AGENTS in grant:
+                return None
+            return set(grant)
+        if not self.access_locked:
+            return None
+        return set()  # known to the gate by id/role only, or not allowed
+
+    def may_use(self, handle: str, agent_key: str) -> bool:
+        allowed = self.permitted_agents(handle)
+        if allowed is None:
+            return True
+        return (agents.canonical(agent_key) or agent_key) in allowed
+
+    def known_handle(self, handle: str) -> bool:
+        folded = normalize_username(handle)
+        return folded in self.allowed_usernames or folded in self.user_agents
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -119,10 +189,12 @@ class Settings:
             allowed_user_ids=_env_ids("JERRY_ALLOWED_USER_IDS"),
             allowed_role_ids=_env_ids("JERRY_ALLOWED_ROLE_IDS"),
             allowed_usernames=_env_names("JERRY_ALLOWED_USERNAMES"),
+            user_agents=_env_user_agents("JERRY_USER_AGENTS"),
             access_locked=_env_has_content(
                 "JERRY_ALLOWED_USER_IDS",
                 "JERRY_ALLOWED_ROLE_IDS",
                 "JERRY_ALLOWED_USERNAMES",
+                "JERRY_USER_AGENTS",
             ),
             use_threads=_env_bool("JERRY_USE_THREADS", True),
         )
@@ -193,6 +265,34 @@ class State:
         if self._bucket("guilds", guild_id).get("agent"):
             return "this server"
         return "the default"
+
+    def agent_key_for(
+        self, handle: str, channel_id: int | None, guild_id: int | None
+    ) -> tuple[str, str]:
+        """The agent this person gets here, and a note if it wasn't the default.
+
+        The channel/server default wins when they're allowed to use it.
+        Otherwise they fall back to a backend they do have, preferring one
+        that's actually installed -- so somebody granted only Grok doesn't
+        have to know what the channel default is.
+        """
+        base = self.agent_key(channel_id, guild_id)
+        allowed = self.settings.permitted_agents(handle)
+        if allowed is None or base in allowed:
+            return base, ""
+        if not allowed:
+            return base, "none"
+        ordered = sorted(
+            allowed,
+            key=lambda key: (
+                not getattr(agents.get(key), "available", False),
+                key,
+            ),
+        )
+        pick = ordered[0]
+        return pick, (
+            f"`{base}` isn't on your list, so I used **{pick}**"
+        )
 
     def set_channel_agent(self, channel_id: int, key: str | None) -> None:
         self._set("channels", channel_id, "agent", key)

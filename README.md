@@ -26,11 +26,13 @@ Each backend is an interactive coding CLI driven in headless mode. **Auth is
 the CLI's own signed-in account — a paid subscription, not an API key.** Jerry
 never sees a credential; it shells out to a binary that is already logged in.
 
-| key | CLI | sign in with |
-| --- | --- | --- |
-| `claude` | Claude Code | Claude Pro or Max |
-| `antigravity` | Antigravity CLI (`agy`) | Google account / AI Plus, Pro or Ultra |
-| `gemini` | Gemini CLI | **personal sign-in discontinued** — see below |
+| key | aliases | CLI | sign in with |
+| --- | --- | --- | --- |
+| `claude` | | Claude Code | Claude Pro or Max |
+| `antigravity` | | Antigravity CLI (`agy`) | Google account / AI Plus, Pro or Ultra |
+| `grok` | `grokbot`, `xai` | Grok Build | X/xAI browser sign-in, or `XAI_API_KEY` |
+| `codex` | `chatgpt`, `gpt` | OpenAI Codex CLI | ChatGPT Plus / Pro / Team |
+| `gemini` | | Gemini CLI | **personal sign-in discontinued** — see below |
 | `codex` | OpenAI Codex CLI | ChatGPT Plus / Pro / Team |
 | `copilot` | GitHub Copilot CLI | GitHub Copilot subscription |
 | `cursor` | Cursor Agent | Cursor Pro |
@@ -171,9 +173,36 @@ One run at a time per channel (two agents in one working tree is a bad time);
   Usernames are the @handle, not the per-server nickname, so changing a
   display name gets nobody in. Matching ignores case and tolerates a copied
   `@` or leading `.`. A handle *can* be changed by its owner though, so for a
-  hard lock use a numeric id. Setting any one of the three lists refuses
-  everyone who doesn't match — including when the values turn out to be
-  unparseable, so a typo locks the bot rather than opening it.
+  hard lock use a numeric id. Setting any one of the lists refuses everyone
+  who doesn't match — including when the values turn out to be unparseable, so
+  a typo locks the bot rather than opening it.
+
+### Giving different people different models
+
+`JERRY_ALLOWED_USERNAMES` grants every backend. To let someone in but limit
+them to specific ones, use `JERRY_USER_AGENTS`:
+
+```
+JERRY_USER_AGENTS=a.o.luzhnov:grok, papai0.3:chatgpt, sam:claude|grok
+```
+
+Entries are comma separated, `handle:agent`, with several agents joined by `|`
+and `*` meaning all of them. Aliases resolve, so `chatgpt` records `codex`.
+Being granted a model also gets you through the door — you don't list the
+person twice.
+
+Each person's **default is their own**. The channel default applies when
+they're allowed to use it; otherwise they silently fall back to a backend they
+do have, preferring one that's installed, and Jerry says which it picked. So
+somebody granted only Grok can just `@Jerry` and get Grok without knowing or
+caring what the channel is set to.
+
+They also can't reach the others: `/agent use`, `/ask agent:` and the mention
+path all check the grant, `/agent list` shows only their own roster, and the
+autocomplete won't even offer the rest. `/doctor` prints the whole matrix.
+
+An unrecognised agent name in a grant is kept rather than dropped — a typo
+should narrow someone's access, never widen it.
 - **`JERRY_FULL_AUTO=1`** removes each CLI's approval prompts *and* its sandbox.
   Faster, and exactly as dangerous as it sounds.
 - Conversation memory and channel settings live in `jerry.state.json`, which is

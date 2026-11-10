@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import discord
@@ -116,11 +117,12 @@ def authorized(user: discord.abc.User | discord.Member) -> bool:
     """Jerry runs agents on a real machine, so the allowlists matter."""
     if SETTINGS.allowed_user_ids and user.id in SETTINGS.allowed_user_ids:
         return True
-    if SETTINGS.allowed_usernames:
-        # `user.name` is the @handle, not the per-server nickname, so this
-        # can't be spoofed by someone changing their display name.
-        if normalize_username(user.name) in SETTINGS.allowed_usernames:
-            return True
+    # `user.name` is the @handle, not the per-server nickname, so this can't be
+    # spoofed by someone changing their display name. Covers both the
+    # unrestricted list and the per-agent grants: being granted one model has
+    # to get you through the door, or the grant means nothing.
+    if SETTINGS.known_handle(user.name):
+        return True
     if SETTINGS.allowed_role_ids and isinstance(user, discord.Member):
         if any(r.id in SETTINGS.allowed_role_ids for r in user.roles):
             return True
@@ -142,17 +144,60 @@ def context_ids(channel: discord.abc.Messageable) -> tuple[int | None, int | Non
     return channel_id, getattr(guild, "id", None)
 
 
+@dataclass
+class Resolved:
+    spec: agents.AgentSpec | None
+    workspace: Path
+    model: str | None
+    key: str
+    note: str = ""  # why this isn't the channel default, if it isn't
+
+
 def resolve(
     channel: discord.abc.Messageable,
+    requester: discord.abc.User | discord.Member | None = None,
     agent_override: str | None = None,
-) -> tuple[agents.AgentSpec | None, Path, str | None, str]:
-    """Work out which agent, workspace and model apply right here."""
+) -> Resolved:
+    """Work out which agent, workspace and model apply for this person here."""
     channel_id, guild_id = context_ids(channel)
-    key = agent_override or STATE.agent_key(channel_id, guild_id)
+    handle = getattr(requester, "name", "") if requester is not None else ""
+
+    note = ""
+    if agent_override:
+        key = agent_override
+    elif handle:
+        key, note = STATE.agent_key_for(handle, channel_id, guild_id)
+    else:
+        key = STATE.agent_key(channel_id, guild_id)
+
+    return Resolved(
+        spec=agents.get(key),
+        workspace=STATE.workspace(channel_id, guild_id),
+        model=STATE.model(channel_id, guild_id),
+        key=key,
+        note=note,
+    )
+
+
+def permission_error(
+    user: discord.abc.User | discord.Member, key: str
+) -> str | None:
+    """Refuse an agent this person isn't granted. None means go ahead."""
+    if SETTINGS.may_use(user.name, key):
+        return None
+    allowed = SETTINGS.permitted_agents(user.name) or set()
     spec = agents.get(key)
-    workspace = STATE.workspace(channel_id, guild_id)
-    model = STATE.model(channel_id, guild_id)
-    return spec, workspace, model, key
+    label = spec.label if spec else key
+    if not allowed:
+        return (
+            f"You're not cleared for any agent, which makes this awkward. "
+            f"Ask whoever runs me to add `@{user.name}`."
+        )
+    mine = ", ".join(f"`{k}`" for k in sorted(allowed))
+    return (
+        f"**{label}** isn't on your list. You've got {mine} — "
+        f"try `/agent use {sorted(allowed)[0]}`."
+    )
 
 
 def convo_id_for(channel: discord.abc.Messageable) -> int:
@@ -405,9 +450,13 @@ async def begin(
     opening_line: str | None = None,
 ) -> str | None:
     """Validate everything, then hand off. Returns an error string if refused."""
-    spec, workspace, model, key = resolve(channel, agent_override)
+    got = resolve(channel, requester, agent_override)
+    spec, workspace, model, key = got.spec, got.workspace, got.model, got.key
     if spec is None:
         return f"{quips.no_agent()} (`{key}` means nothing to me)"
+    denied = permission_error(requester, spec.key)
+    if denied:
+        return denied
     if not spec.available:
         return (
             f"{quips.no_binary()}\n`{spec.binary}` is not on this machine's PATH.\n"
@@ -424,10 +473,10 @@ async def begin(
         target = await open_workspace_thread(channel, task, source)
 
     await react(source, "\U0001f440")
-    status_msg = await target.send(
-        opening_line or f"{quips.accepted(task)} — warming up {spec.label}…",
-        allowed_mentions=NO_PINGS,
-    )
+    opening = opening_line or f"{quips.accepted(task)} — warming up {spec.label}…"
+    if got.note and got.note != "none":
+        opening += f"\n_{got.note}._"
+    status_msg = await target.send(opening, allowed_mentions=NO_PINGS)
     await dispatch(
         target=target,
         status_msg=status_msg,
@@ -541,10 +590,16 @@ async def agent_autocomplete(
     current = (current or "").lower()
     out: list[app_commands.Choice[str]] = []
     for spec in agents.all_specs():
-        if current and current not in spec.key and current not in spec.label.lower():
+        # Don't offer people agents they aren't cleared for.
+        if not SETTINGS.may_use(interaction.user.name, spec.key):
+            continue
+        haystack = (spec.key, spec.label.lower()) + spec.aliases
+        if current and not any(current in h for h in haystack):
             continue
         tag = "" if spec.available else " (not installed)"
-        out.append(app_commands.Choice(name=f"{spec.key} — {spec.label}{tag}", value=spec.key))
+        out.append(
+            app_commands.Choice(name=f"{spec.key} — {spec.label}{tag}", value=spec.key)
+        )
     return out[:25]
 
 
@@ -568,15 +623,22 @@ async def ask(
         return
 
     await interaction.response.defer(thinking=True)
-    spec, workspace, model, key = resolve(interaction.channel, agent)
+    got = resolve(interaction.channel, interaction.user, agent)
+    spec, workspace, model, key = got.spec, got.workspace, got.model, got.key
+    if spec is not None:
+        denied = permission_error(interaction.user, spec.key)
+        if denied:
+            await interaction.followup.send(denied, ephemeral=True)
+            return
     if spec is None or not spec.available or not workspace.is_dir():
         error = await _preflight_error(spec, key, workspace)
         await interaction.followup.send(error, ephemeral=True)
         return
 
-    status_msg = await interaction.followup.send(
-        f"{quips.accepted(prompt)} — taking this to {spec.label}…", wait=True
-    )
+    opening = f"{quips.accepted(prompt)} — taking this to {spec.label}…"
+    if got.note and got.note != "none":
+        opening += f"\n_{got.note}._"
+    status_msg = await interaction.followup.send(opening, wait=True)
     channel = interaction.channel
     target: discord.abc.Messageable = channel  # type: ignore[assignment]
     if thread and not isinstance(channel, discord.Thread):
@@ -632,16 +694,33 @@ agent_group = app_commands.Group(name="agent", description="Choose who does the 
 @agent_group.command(name="list", description="Who is on the bench, and who is installed.")
 async def agent_list(interaction: discord.Interaction) -> None:
     channel_id, guild_id = context_ids(interaction.channel)
-    current = STATE.agent_key(channel_id, guild_id)
+    allowed = SETTINGS.permitted_agents(interaction.user.name)
+    mine = [s for s in agents.all_specs() if allowed is None or s.key in allowed]
+    current, note = STATE.agent_key_for(interaction.user.name, channel_id, guild_id)
     scope = STATE.agent_scope(channel_id, guild_id)
+
+    if not mine:
+        await interaction.response.send_message(
+            "You aren't cleared for any agent. Ask whoever runs me to add "
+            f"`@{interaction.user.name}`.",
+            ephemeral=True,
+        )
+        return
+
+    body = fmt.roster_lines(mine, current)
+    if allowed is not None:
+        body += (
+            "\n\n_This is your personal list — other people here have "
+            "different ones._"
+        )
     embed = discord.Embed(
         title="The roster",
-        description=fmt.roster_lines(agents.all_specs(), current)[: fmt.EMBED_DESC_LIMIT],
+        description=body[: fmt.EMBED_DESC_LIMIT],
         colour=0x5865F2,
     )
-    embed.set_footer(
-        text=f"Currently using {current} (set at {scope}). Switch with /agent use."
-    )
+    footer = f"You get {current} here"
+    footer += f" (channel default is set at {scope})." if not note else " — your own default."
+    embed.set_footer(text=footer + " Switch with /agent use.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -652,6 +731,10 @@ async def agent_use(interaction: discord.Interaction, agent: str) -> None:
     spec = agents.get(agent)
     if spec is None:
         await interaction.response.send_message(quips.no_agent(), ephemeral=True)
+        return
+    denied = permission_error(interaction.user, spec.key)
+    if denied:
+        await interaction.response.send_message(denied, ephemeral=True)
         return
     channel_id, _ = context_ids(interaction.channel)
     if channel_id is None:
@@ -917,17 +1000,23 @@ async def doctor_cmd(interaction: discord.Interaction) -> None:
     auto = "yolo (no sandbox)" if SETTINGS.full_auto else "auto-edit (sandboxed where supported)"
     if not SETTINGS.access_locked:
         gate = "⚠ wide open — anyone who can see me"
-    elif SETTINGS.allowed_usernames or SETTINGS.allowed_user_ids or SETTINGS.allowed_role_ids:
+    elif (
+        SETTINGS.allowed_usernames
+        or SETTINGS.user_agents
+        or SETTINGS.allowed_user_ids
+        or SETTINGS.allowed_role_ids
+    ):
         bits = []
-        if SETTINGS.allowed_usernames:
-            bits.append(
-                "@" + ", @".join(sorted(SETTINGS.allowed_usernames)[:6])
-            )
+        for handle in sorted(SETTINGS.allowed_usernames)[:6]:
+            bits.append(f"@{handle} → every agent")
+        for handle, keys in sorted(SETTINGS.user_agents.items())[:10]:
+            shown = "every agent" if "*" in keys else ", ".join(sorted(keys))
+            bits.append(f"@{handle} → {shown}")
         if SETTINGS.allowed_user_ids:
-            bits.append(f"{len(SETTINGS.allowed_user_ids)} user id(s)")
+            bits.append(f"{len(SETTINGS.allowed_user_ids)} user id(s) → every agent")
         if SETTINGS.allowed_role_ids:
-            bits.append(f"{len(SETTINGS.allowed_role_ids)} role(s)")
-        gate = "allowlist on — " + " · ".join(bits)
+            bits.append(f"{len(SETTINGS.allowed_role_ids)} role(s) → every agent")
+        gate = "allowlist on\n" + "\n".join(f" {b}" for b in bits)
     else:
         gate = "\U0001f512 locked — an allowlist is set but holds nothing valid"
     body = (

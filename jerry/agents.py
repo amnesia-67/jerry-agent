@@ -71,6 +71,8 @@ class AgentSpec:
     model_args: tuple[str, ...] = ()
     auto_args: tuple[str, ...] = ()
     full_auto_args: tuple[str, ...] = ()
+    # Other names people call this thing, so `/agent use chatgpt` works.
+    aliases: tuple[str, ...] = ()
     default_model: str | None = None
     install: str = ""
     login: str = ""
@@ -213,6 +215,7 @@ _register(
         model_args=("-m", "{model}"),
         auto_args=("--sandbox", "workspace-write"),
         full_auto_args=("--dangerously-bypass-approvals-and-sandbox",),
+        aliases=("chatgpt", "gpt", "openai"),
         install="npm i -g @openai/codex",
         login="run `codex` once and choose Sign in with ChatGPT (Plus/Pro/Team plan)",
         blurb="Sandboxed by default. Good at surgical edits.",
@@ -234,6 +237,29 @@ _register(
         install="npm i -g @github/copilot",
         login="run `copilot` then /login with your GitHub Copilot subscription",
         blurb="Knows GitHub. Headless mode trusts every tool, so mind the workspace.",
+    )
+)
+
+_register(
+    # xAI's official CLI (the npm package is published by xai-security@x.ai).
+    # Flags come from third-party guides rather than xAI's own docs and have
+    # NOT been run against the binary -- verify with /doctor, patch via
+    # agents.local.json. No auto-approve flag is documented, so a run that
+    # wants approval will stall until Jerry's timeout kills it.
+    AgentSpec(
+        key="grok",
+        label="Grok Build",
+        emoji="\U0001f6f0️",
+        binary="grok",
+        argv=("{MODEL}", "-p", "{prompt}"),
+        model_args=("--model", "{model}"),
+        aliases=("grok-build", "xai", "grokbot"),
+        install="npm i -g @xai-official/grok",
+        login=(
+            "run `grok` once and finish the browser sign-in; XAI_API_KEY also "
+            "works for headless"
+        ),
+        blurb="xAI's Grok Build. Browser OAuth by default, so no API key needed.",
     )
 )
 
@@ -351,9 +377,23 @@ def load_overrides(path: Path) -> list[str]:
 
 
 def get(key: str | None) -> AgentSpec | None:
+    """Look a backend up by key, or by any name people call it."""
     if not key:
         return None
-    return REGISTRY.get(key.strip().lower())
+    wanted = key.strip().lower()
+    direct = REGISTRY.get(wanted)
+    if direct is not None:
+        return direct
+    for spec in REGISTRY.values():
+        if wanted in spec.aliases:
+            return spec
+    return None
+
+
+def canonical(key: str | None) -> str | None:
+    """Resolve a name or alias to the registry key it refers to."""
+    spec = get(key)
+    return spec.key if spec is not None else None
 
 
 def all_specs() -> list[AgentSpec]:
