@@ -51,9 +51,10 @@ _WINDOWS_SUFFIXES = (".exe", ".cmd", ".bat", ".ps1", "")
 
 # How a CLI is told to go read its task from a file instead of from argv.
 TASK_FILE_POINTER = (
-    "Your full instructions are in the UTF-8 text file at {path}. "
-    "Read that file first, then carry out exactly what it says. "
-    "The file is scratch space outside the repository; do not edit or commit it."
+    "Your full instructions are in the UTF-8 text file at {path}, inside the "
+    "workspace so you can read it directly. Read it first, then carry out "
+    "exactly what it says. It is scratch space that is already git-ignored and "
+    "gets deleted when this run ends: do not edit, commit or report on it."
 )
 
 
@@ -469,12 +470,33 @@ def build_prompt(task: str, workspace: Path, history: Iterable[str] = ()) -> str
     return "\n\n".join(parts)
 
 
-def _write_task_file(prompt: str) -> Path:
-    """Park the prompt in a temp file so it never touches a command line."""
+TASK_DIR_NAME = ".jerry"
+
+
+def _write_task_file(prompt: str, workspace: Path) -> Path:
+    """Park the prompt in a file so it never touches a command line.
+
+    It goes *inside* the workspace, under `.jerry/`, because coding agents
+    sandbox their reads to the working directory: a file in the system temp
+    dir is one the agent is not allowed to open, and it would rather tell you
+    about the permission error than do the task. The directory carries its own
+    `.gitignore` of `*`, so git ignores it (and itself) without us editing the
+    repository's own ignore file. The file is deleted when the run ends.
+    """
     import tempfile
 
-    folder = Path(tempfile.gettempdir()) / "jerry-tasks"
-    folder.mkdir(parents=True, exist_ok=True)
+    folder = workspace / TASK_DIR_NAME
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        marker = folder / ".gitignore"
+        if not marker.exists():
+            marker.write_text("*\n", encoding="utf-8")
+    except OSError:
+        # Read-only or missing workspace: fall back to temp and accept that a
+        # sandboxed agent may not be able to read it.
+        folder = Path(tempfile.gettempdir()) / "jerry-tasks"
+        folder.mkdir(parents=True, exist_ok=True)
+
     handle, name = tempfile.mkstemp(
         prefix="task-", suffix=".md", dir=str(folder), text=False
     )
@@ -558,7 +580,7 @@ async def run_agent(
     task_file: Path | None = None
     argv_prompt = prompt
     if len(prompt) > ARGV_PROMPT_LIMIT or is_batch_shim(binary):
-        task_file = _write_task_file(prompt)
+        task_file = _write_task_file(prompt, workspace)
         pointer = TASK_FILE_POINTER.format(path=task_file)
         if argv_hostile(str(task_file)):
             # A temp path we cannot quote safely. Vanishingly rare; bail loudly
