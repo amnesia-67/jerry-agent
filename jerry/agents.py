@@ -111,8 +111,37 @@ _register(
         auto_args=("--approval-mode", "auto_edit"),
         full_auto_args=("--approval-mode", "yolo"),
         install="npm i -g @google/gemini-cli",
-        login="run `gemini` once and choose Login with Google (uses your Google AI Pro/Ultra plan)",
-        blurb="The house default. Enormous context window, cheerful about big repos.",
+        login=(
+            "needs a paid Gemini API key or a Code Assist Standard/Enterprise "
+            "licence — Login with Google stopped working on 2026-06-18"
+        ),
+        blurb=(
+            "Sunset for personal plans since 2026-06-18; AI Pro/Ultra sign-in is "
+            "refused. Use `antigravity` instead."
+        ),
+    )
+)
+
+_register(
+    # Google's replacement for Gemini CLI on personal plans. Flags below come
+    # from antigravity.google/docs/cli (headless + permissions) and have NOT
+    # been run against the binary yet; patch via agents.local.json if one moved.
+    AgentSpec(
+        key="antigravity",
+        label="Antigravity CLI",
+        emoji="\U0001f680",
+        binary="agy",
+        argv=("{AUTO}", "{MODEL}", "-p", "{prompt}"),
+        model_args=("--model", "{model}"),
+        # accept-edits auto-approves file writes but still evaluates shell
+        # commands, and headless SOFT-DENIES what it cannot ask about: the run
+        # exits 0 having quietly skipped the edit. Set JERRY_FULL_AUTO=1 if you
+        # need it to run builds and tests unattended.
+        auto_args=("--mode", "accept-edits"),
+        full_auto_args=("--dangerously-skip-permissions",),
+        install="irm https://antigravity.google/cli/install.ps1 | iex",
+        login="run `agy` once and sign in with Google; headless reuses the keyring session",
+        blurb="Gemini CLI's official successor, on the same Google AI plan.",
     )
 )
 

@@ -28,8 +28,9 @@ never sees a credential; it shells out to a binary that is already logged in.
 
 | key | CLI | sign in with |
 | --- | --- | --- |
-| `gemini` *(default)* | Gemini CLI | Google account / Google AI Pro or Ultra |
 | `claude` | Claude Code | Claude Pro or Max |
+| `antigravity` | Antigravity CLI (`agy`) | Google account / AI Plus, Pro or Ultra |
+| `gemini` | Gemini CLI | **personal sign-in discontinued** — see below |
 | `codex` | OpenAI Codex CLI | ChatGPT Plus / Pro / Team |
 | `copilot` | GitHub Copilot CLI | GitHub Copilot subscription |
 | `cursor` | Cursor Agent | Cursor Pro |
@@ -40,18 +41,43 @@ never sees a credential; it shells out to a binary that is already logged in.
 Install at least one and log in **once, interactively**, before starting Jerry:
 
 ```bash
-npm i -g @google/gemini-cli
+npm i -g @anthropic-ai/claude-code
 ```
 
 ```bash
-gemini
+claude
 ```
 
-Pick "Login with Google", finish in the browser, quit. The token is cached in
-your home directory, and every headless run Jerry makes reuses it. Same idea
-for the others (`claude`, `codex`, `copilot` + `/login`, `cursor-agent login`).
+Then `/login`. The credentials are cached, and every headless run Jerry makes
+reuses them. Same idea for the others (`codex`, `copilot` + `/login`,
+`cursor-agent login`, `agy`).
 
-`/doctor` tells you which ones Jerry can actually see.
+`/doctor` tells you which ones Jerry can actually see — and, importantly,
+which are on `PATH` but don't run. A `copilot` that resolves to a VS Code shim
+looks installed until you execute it.
+
+### A note on Gemini
+
+Google stopped serving Gemini CLI for personal accounts on **2026-06-18** —
+Gemini Code Assist for individuals, Google AI Pro and AI Ultra all included.
+Signing in succeeds and then requests fail with `IneligibleTierError` /
+`UNSUPPORTED_CLIENT`. The `gemini` backend is kept because paid Gemini API keys
+and Code Assist Standard/Enterprise licences still work, but on a personal plan
+use `antigravity` instead — it's Google's official successor and runs on the
+same subscription:
+
+```bash
+irm https://antigravity.google/cli/install.ps1 | iex
+```
+
+```bash
+agy
+```
+
+Sign in with Google once; headless runs reuse the keyring session. Note that
+`agy` in its default headless mode *soft-denies* anything it can't get approval
+for — **the run exits 0 having skipped the edit**. Set `JERRY_FULL_AUTO=1` if it
+needs to actually change files and run commands unattended.
 
 ### Fixing a CLI's flags without touching code
 
