@@ -168,6 +168,18 @@ Each teammate clones this repo and runs one command:
 python setup_sub.py
 ```
 
+If they'd rather hand it to their own coding agent, give them
+[TEAMMATE_SETUP.md](TEAMMATE_SETUP.md) instead: fill in the values block at the
+top, send it privately (it will contain a bot token), and their agent can do
+the whole thing except the one browser sign-in. It ends with
+
+```bash
+python setup_sub.py --check
+```
+
+which prompts for nothing, exits non-zero on any problem, and prints the sub's
+bot user id.
+
 It builds the venv, asks for their handle, their own bot token, master's id and
 the channel id, picks an agent, sets up the workspace (cloning it if needed),
 writes their `.env`, prints their bot's invite URL, and prints the exact
@@ -312,7 +324,8 @@ should narrow someone's access, never widen it.
 ```
 bot.py                master Jerry: mentions, slash commands, routing
 subjerry.py           sub-Jerry: runs agents on a teammate's own machine
-setup_sub.py          one-shot setup a teammate runs to become a sub
+setup_sub.py          a teammate's setup; --check verifies it unattended
+TEAMMATE_SETUP.md     brief a teammate hands to their own coding agent
 jerry/bus.py          the dispatch protocol, and the trust gate
 jerry/dispatch.py     master-side routing and result matching
 jerry/agents.py       backend registry + headless process runner

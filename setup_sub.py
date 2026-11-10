@@ -1,10 +1,15 @@
-"""One-shot setup for a sub-Jerry. Run this on YOUR machine.
+"""Setup for a sub-Jerry. Run this on YOUR machine.
 
-    python setup_sub.py
+    python setup_sub.py            interactive setup, asks what it needs
+    python setup_sub.py --check    verify an existing setup, asks nothing
 
-Creates the virtualenv, installs dependencies, asks for the handful of things
-only you know, writes your .env, and prints the two lines to send back to
-whoever runs master Jerry.
+The interactive mode creates the virtualenv, installs dependencies, asks for
+the handful of things only you know, writes your .env, and prints the lines to
+send back to whoever runs master Jerry.
+
+``--check`` prompts for nothing and exits non-zero if anything is wrong, so it
+works unattended -- useful when a coding agent is doing the setup for you, or
+in a terminal you can't type into.
 
 Deliberately depends on nothing but the standard library, so it works before
 the virtualenv exists.
@@ -317,7 +322,149 @@ def main() -> None:
     say()
 
 
+# --------------------------------------------------------------------------- #
+# --check: verify without asking anything
+# --------------------------------------------------------------------------- #
+
+REQUIRED_KEYS = (
+    "DISCORD_TOKEN",
+    "JERRY_SUB_OWNER",
+    "JERRY_MASTER_ID",
+    "JERRY_DISPATCH_CHANNEL_ID",
+    "JERRY_WORKSPACE",
+    "JERRY_DEFAULT_AGENT",
+)
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    """Minimal .env parser, so --check needs no third-party import."""
+    found: dict[str, str] = {}
+    if not path.exists():
+        return found
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        found[key.strip()] = value.strip().strip('"')
+    return found
+
+
+def run_check() -> int:
+    say("sub-Jerry self-check")
+    say("=" * 64)
+    problems: list[str] = []
+
+    def ok(label: str, detail: str = "") -> None:
+        say(f"  [ok]   {label}" + (f"  {detail}" if detail else ""))
+
+    def bad(label: str, fix: str) -> None:
+        say(f"  [FAIL] {label}")
+        say(f"         fix: {fix}")
+        problems.append(label)
+
+    # 1. virtualenv and dependencies
+    python = venv_python()
+    if not python.exists():
+        bad("virtualenv missing", f"{sys.executable} -m venv .venv")
+    else:
+        probe = subprocess.run(
+            [str(python), "-c", "import discord, dotenv; print(discord.__version__)"],
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0:
+            ok("dependencies", f"discord.py {probe.stdout.strip()}")
+        else:
+            bad(
+                "dependencies not installed",
+                f"{python} -m pip install -r requirements.txt",
+            )
+
+    # 2. .env contents
+    values = read_env_file(ENV_PATH)
+    if not values:
+        bad(".env missing or empty", "copy .env.sub.example to .env and fill it in")
+    else:
+        missing = [k for k in REQUIRED_KEYS if not values.get(k)]
+        if missing:
+            bad(f".env missing: {', '.join(missing)}", "fill those in")
+        else:
+            ok(".env", f"owner @{values['JERRY_SUB_OWNER']}")
+
+        for key in ("JERRY_MASTER_ID", "JERRY_DISPATCH_CHANNEL_ID"):
+            raw = values.get(key, "")
+            if raw and (not raw.isdigit() or len(raw) < 17):
+                bad(f"{key} is not a Discord id", "17+ digits, no quotes")
+
+        token = values.get("DISCORD_TOKEN", "")
+        if token:
+            uid = bot_user_id(token)
+            if uid is None:
+                bad("DISCORD_TOKEN looks malformed", "re-copy it from the portal")
+            else:
+                ok("bot token parses", f"this sub's bot user id is {uid}")
+                if str(uid) == values.get("JERRY_MASTER_ID"):
+                    bad(
+                        "this token IS master's",
+                        "each person needs their OWN bot, not master's token",
+                    )
+
+    # 3. workspace
+    raw_ws = values.get("JERRY_WORKSPACE", "")
+    if raw_ws:
+        workspace = Path(raw_ws).expanduser()
+        if workspace.is_dir():
+            git = " (git repo)" if (workspace / ".git").exists() else " (not a git repo)"
+            ok("workspace", f"{workspace}{git}")
+        else:
+            bad(f"workspace {workspace} does not exist", "create or clone it")
+
+    # 4. the agent itself
+    agent_key = values.get("JERRY_DEFAULT_AGENT", "")
+    if agent_key:
+        sys.path.insert(0, str(ROOT))
+        from jerry import agents  # noqa: PLC0415
+
+        spec = agents.get(agent_key)
+        if spec is None:
+            bad(f"unknown agent {agent_key!r}", "pick one from /agent list")
+        elif not spec.available:
+            bad(f"{spec.label} is not installed", spec.install)
+        else:
+            probe = subprocess.run(
+                [spec.resolved_binary or spec.binary, "--version"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "NO_COLOR": "1"},
+            )
+            if probe.returncode == 0:
+                ok(spec.label, (probe.stdout or probe.stderr).strip().splitlines()[-1][:40])
+            else:
+                bad(
+                    f"{spec.label} is on PATH but won't run",
+                    "it may be a stub; install the real CLI",
+                )
+
+    say("=" * 64)
+    if problems:
+        say(f"{len(problems)} problem(s) to fix. Nothing was changed.")
+        say()
+        say("Note: this check cannot tell whether the agent CLI is signed in.")
+        say("That needs a browser and a human. Run the CLI once by hand.")
+        return 1
+
+    say("All checks passed. Start it with:")
+    say(f"  {venv_python()} subjerry.py")
+    say()
+    say("This does NOT prove the CLI is signed in -- that needs a browser and a")
+    say("human. If jobs come back with an auth error, run the CLI once by hand.")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--check" in sys.argv:
+        raise SystemExit(run_check())
     try:
         main()
     except KeyboardInterrupt:
