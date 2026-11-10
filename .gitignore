@@ -1,0 +1,6 @@
+.env
+.venv/
+jerry.state.json
+agents.local.json
+__pycache__/
+*.pyc

@@ -1,0 +1,6 @@
+{
+  "_comment": "Rename to agents.local.json to use. Patches jerry/agents.py specs at startup; see README.",
+  "gemini": {
+    "default_model": "gemini-2.5-pro"
+  }
+}
