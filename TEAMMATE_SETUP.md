@@ -19,7 +19,7 @@ verification step. Stop and ask the human where a step says to.
 ```
 YOUR_DISCORD_HANDLE   = FILL_IN        # no @, lowercase, e.g. a.o.luzhnov
 SUB_BOT_TOKEN         = FILL_IN        # this machine's own bot token
-MASTER_BOT_ID         = FILL_IN        # the only id this sub will obey
+MASTER_BOT_ID         = FILL_IN        # an ID, not a token. public, 17+ digits
 DISPATCH_CHANNEL_ID   = FILL_IN        # the private channel it listens in
 AGENT                 = FILL_IN        # claude | antigravity | grok | codex
 WORKSPACE             = FILL_IN        # folder the agent may edit here
@@ -29,6 +29,12 @@ FULL_AUTO             = 0              # 1 lets agents run shell commands here
 
 `SUB_BOT_TOKEN` is a **secret**. It goes in `.env` and nowhere else. Never
 commit it, never paste it into a chat channel, never echo it to the terminal.
+
+There is deliberately **no master token** in this list, and there should never
+be one. `MASTER_BOT_ID` is only a user id — public, and useless on its own.
+Master Jerry's token stays with whoever runs master and is shared with nobody.
+A sub-Jerry holding master's token would be a second master, not a sub;
+`setup_sub.py --check` refuses that outright.
 
 ---
 
