@@ -179,11 +179,31 @@ One run at a time per channel (two agents in one working tree is a bad time);
 - Conversation memory and channel settings live in `jerry.state.json`, which is
   gitignored. `/reset` clears a thread's memory.
 - Prompts are kept off the command line whenever it can't carry them safely —
-  always on Windows, where npm installs agents as `.cmd` shims that Windows
-  runs through `cmd.exe`, and anywhere the prompt exceeds 6000 characters. In
-  those cases the prompt goes to a temp file and the agent is told to read it,
-  so a message containing `"`, `&` or `%PATH%` can't be mangled or executed.
-  The temp file is deleted when the run ends.
+  always for a Windows `.cmd` shim, which is how npm installs most of these
+  agents and which Windows runs through `cmd.exe`, and for any prompt over
+  6000 characters. The prompt then goes in a file and the agent is told to read
+  it, so a message containing `"`, `&` or `%PATH%` can't be mangled or
+  executed.
+
+  That file lands in `<workspace>/.jerry/`, **not** the system temp directory,
+  because agents sandbox their reads to the working directory — a task file
+  outside it is one the agent isn't allowed to open, and it will report a
+  permission error instead of doing the work. The directory holds a
+  `.gitignore` of `*` so git ignores it and itself, leaving your repo's own
+  ignore rules alone, and the task file is deleted when the run ends.
+
+- If an agent reports success having done nothing, suspect the permission mode
+  before suspecting the model. With `JERRY_FULL_AUTO=0`, `agy` and Claude will
+  write files but *soft-deny* shell commands in headless mode — the run exits 0
+  with a note on stderr. Set `JERRY_FULL_AUTO=1` for unattended work, or give
+  `agy` scoped allow-rules in `~/.gemini/antigravity-cli/settings.json`
+  (on Windows, matching subcommands needs the `regex:` prefix, so
+  `command(regex:git .*)` rather than `command(git)`).
+
+- An installer that edits your PATH can't reach processes that already exist,
+  so a CLI installed after the bot started is invisible to it — and to the
+  terminal that launched it. Jerry also checks the usual per-user install
+  directories, so this resolves itself instead of needing a fresh terminal.
 
 ## Layout
 
