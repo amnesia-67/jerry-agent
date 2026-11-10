@@ -87,6 +87,56 @@ def tidy_tail(text: str, limit: int = 160) -> str:
     return line
 
 
+# Recognisable failures, so a wall of stack trace comes with the one line that
+# actually fixes it. Matched case-insensitively against the agent's output.
+_DEAD_TIER = (
+    "ineligibletiererror",
+    "no longer supported for gemini code assist",
+    "unsupported_client",
+)
+_NOT_SIGNED_IN = (
+    "not logged in",
+    "please run /login",
+    "authentication required",
+    "error authenticating",
+    "please set an auth method",
+)
+_NOT_INSTALLED = (
+    "is not recognized as an internal or external command",
+    "command not found",
+    "was not found. run",
+)
+_THROTTLED = ("resource_exhausted", "rate limit", "quota exceeded", "429")
+
+
+def _mentions(haystack: str, needles: Iterable[str]) -> bool:
+    return any(n in haystack for n in needles)
+
+
+def failure_hint(output: str, spec) -> str | None:
+    """One actionable line for a failure we recognise, else None."""
+    low = (output or "").lower()
+    if not low:
+        return None
+
+    if _mentions(low, _DEAD_TIER):
+        return (
+            "Google stopped serving Gemini CLI for personal plans on 2026-06-18. "
+            "Switch this channel with `/agent use antigravity` — it runs on the "
+            "same subscription."
+        )
+    if _mentions(low, _NOT_INSTALLED):
+        return f"`{spec.binary}` isn't really installed. Try `{spec.install}`, then `/doctor`."
+    if _mentions(low, _NOT_SIGNED_IN):
+        return f"**{spec.label}** isn't signed in on the host — {spec.login}."
+    if _mentions(low, _THROTTLED):
+        return (
+            "That looks like a quota or rate limit. `/agent list` shows who else "
+            "is available."
+        )
+    return None
+
+
 def roster_lines(specs: Iterable, current: str | None = None) -> str:
     rows: list[str] = []
     for spec in specs:

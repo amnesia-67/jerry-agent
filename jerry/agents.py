@@ -194,7 +194,10 @@ _register(
         auto_args=("--permission-mode", "acceptEdits"),
         full_auto_args=("--dangerously-skip-permissions",),
         install="npm i -g @anthropic-ai/claude-code",
-        login="run `claude` once and sign in with your Claude Pro/Max account",
+        login=(
+            "run `claude auth login` on the host, or `claude setup-token` for a "
+            "long-lived one; `claude auth status` checks it"
+        ),
         blurb="Strong multi-file refactors. Reads before it writes.",
     )
 )

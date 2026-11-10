@@ -235,6 +235,9 @@ async def send_result(
         await target.send(f"\U0001f480 {quips.failed()}\n```\n{result.error[:1500]}\n```")
         return
 
+    # A recognised failure gets the fix on the first line, above the noise.
+    hint = None if result.ok else fmt.failure_hint(body, spec)
+
     if result.timed_out:
         header = (
             f"⏱️ {quips.timed_out()} "
@@ -247,6 +250,9 @@ async def send_result(
             f"{spec.emoji} **{spec.label}** · `{duration}` · "
             f"exit `{result.exit_code}` — {quips.failed()}"
         )
+
+    if hint:
+        header += f"\n\U0001f4a1 {hint}"
 
     if not body:
         hint = ""
